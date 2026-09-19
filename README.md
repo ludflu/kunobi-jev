@@ -104,25 +104,25 @@ if you need to walk them.
 State and descriptions are an `Entry`: text, a JSON object, a JSON array, or null.
 Use `Entry::from_serialize(&value)` for your own structs. Object key order is kept.
 
-### OpenRouter (optional)
+### OpenRouter
 
-[`Client::new`](https://docs.rs/kunobi-jev/latest/kunobi_jev/struct.Client.html#method.new) always
-targets TypeSafe. To use [OpenRouter](https://openrouter.ai)'s Decisions API instead, opt in
-explicitly. Questions, answers, and [`SystemOne`](https://docs.rs/kunobi-jev/latest/kunobi_jev/trait.SystemOne.html)
-stay the same; only the host, model slug, and API key change.
-
-Set `OPENROUTER_API_KEY`, then:
+You can also call Jev through [OpenRouter](https://openrouter.ai)'s Decisions API.
+Questions, answers, and [`SystemOne`](https://docs.rs/kunobi-jev/latest/kunobi_jev/trait.SystemOne.html)
+are unchanged; use [`Client::openrouter`](https://docs.rs/kunobi-jev/latest/kunobi_jev/struct.Client.html#method.openrouter)
+(or [`ClientBuilder::openrouter`](https://docs.rs/kunobi-jev/latest/kunobi_jev/struct.ClientBuilder.html#method.openrouter))
+with `OPENROUTER_API_KEY`:
 
 ```rust
 let client = kunobi_jev::Client::openrouter()?;
 // or: Client::builder().openrouter().build()?
 ```
 
-Defaults: base URL `https://openrouter.ai/api`, model `~typesafe/jev-latest` (OpenRouter's
-alias for the latest Jev). Pin a version with `.default_model("typesafe/jev-1.13")` or
-`OPENROUTER_DEFAULT_MODEL`. Optional OpenRouter headers (`HTTP-Referer`, `X-OpenRouter-Title`)
-go through [`ClientBuilder::default_header`](https://docs.rs/kunobi-jev/latest/kunobi_jev/struct.ClientBuilder.html#method.default_header).
-The Models API (`client.models().list()`) is TypeSafe-only.
+OpenRouter clients use base URL `https://openrouter.ai/api`, model `~typesafe/jev-latest`
+(OpenRouter's alias for the latest Jev), and POST `/alpha/decisions`. Pin a version with
+`.default_model("typesafe/jev-1.13")` or `OPENROUTER_DEFAULT_MODEL`. Optional OpenRouter
+headers (`HTTP-Referer`, `X-OpenRouter-Title`) go through
+[`ClientBuilder::default_header`](https://docs.rs/kunobi-jev/latest/kunobi_jev/struct.ClientBuilder.html#method.default_header).
+The Models API (`client.models().list()`) remains on TypeSafe only.
 
 ### Typed labels
 
@@ -187,10 +187,8 @@ which take precedence.
 | `log_bodies` | | off |
 | `allow_insecure_http` | | off |
 
-With [`ClientBuilder::openrouter`](https://docs.rs/kunobi-jev/latest/kunobi_jev/struct.ClientBuilder.html#method.openrouter),
-the same builder methods read `OPENROUTER_API_KEY`, `OPENROUTER_BASE_URL`, and
-`OPENROUTER_DEFAULT_MODEL` instead, with defaults `https://openrouter.ai/api`,
-`~typesafe/jev-latest`, and POST `/alpha/decisions`.
+See [OpenRouter](#openrouter) for `OPENROUTER_API_KEY`, `OPENROUTER_BASE_URL`, and
+`OPENROUTER_DEFAULT_MODEL` when building with `.openrouter()`.
 
 Per call, you can override the timeouts, the retry policy and headers:
 
