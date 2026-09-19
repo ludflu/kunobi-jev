@@ -1,5 +1,6 @@
 //! The API client.
 
+mod backend;
 mod builder;
 mod call;
 mod env;
@@ -14,9 +15,13 @@ use std::time::Duration;
 use reqwest::Method;
 use reqwest::header::HeaderMap;
 
+pub use backend::Backend;
 pub use builder::ClientBuilder;
 pub use call::{Call, RawResponse, WithResponse};
-pub use env::{ENV_API_KEY, ENV_BASE_URL, ENV_DEFAULT_MODEL};
+pub use env::{
+    ENV_API_KEY, ENV_BASE_URL, ENV_DEFAULT_MODEL, ENV_OPENROUTER_API_KEY, ENV_OPENROUTER_BASE_URL,
+    ENV_OPENROUTER_DEFAULT_MODEL,
+};
 pub use models::Models;
 
 use crate::answers::SystemOneResult;
@@ -30,6 +35,12 @@ pub const DEFAULT_BASE_URL: &str = "https://api.typesafe.ai";
 /// Default model.
 pub const DEFAULT_MODEL: &str = "jev-latest";
 
+/// Default OpenRouter API root (without a trailing path segment for decisions).
+pub const OPENROUTER_DEFAULT_BASE_URL: &str = "https://openrouter.ai/api";
+
+/// Default OpenRouter model alias for the latest Jev release.
+pub const OPENROUTER_DEFAULT_MODEL: &str = "~typesafe/jev-latest";
+
 /// Client for the TypeSafe API.
 ///
 /// Cloning is cheap and clones share one connection pool.
@@ -39,6 +50,7 @@ pub struct Client {
 }
 
 struct Inner {
+    backend: Backend,
     credentials: Credentials,
     base_url: String,
     log_bodies: bool,
@@ -55,13 +67,27 @@ struct Inner {
 }
 
 impl Client {
-    /// A client configured from the environment.
+    /// A client for the TypeSafe API, configured from the environment.
     ///
-    /// Reads `TYPESAFE_API_KEY` (required), `TYPESAFE_BASE_URL` and
-    /// `TYPESAFE_DEFAULT_MODEL`. Use [`Client::builder`] to set values in code
-    /// or to authenticate with a [`CredentialProvider`](crate::CredentialProvider).
+    /// This is the default backend. Reads `TYPESAFE_API_KEY` (required),
+    /// `TYPESAFE_BASE_URL` and `TYPESAFE_DEFAULT_MODEL`. For OpenRouter, use
+    /// [`Client::openrouter`]. Use [`Client::builder`] to set values in code or
+    /// to authenticate with a [`CredentialProvider`](crate::CredentialProvider).
     pub fn new() -> crate::Result<Self> {
         Self::builder().build()
+    }
+
+    /// A client for Jev through [OpenRouter](https://openrouter.ai)'s Decisions API.
+    ///
+    /// Reads `OPENROUTER_API_KEY` (required), `OPENROUTER_BASE_URL` and
+    /// `OPENROUTER_DEFAULT_MODEL`. Equivalent to [`Client::builder`].openrouter().build().
+    pub fn openrouter() -> crate::Result<Self> {
+        Self::builder().openrouter().build()
+    }
+
+    /// Which API this client calls.
+    pub fn backend(&self) -> Backend {
+        self.inner.backend
     }
 
     /// A builder for a client. Values set in code take precedence over the environment.
@@ -127,7 +153,7 @@ impl Client {
         Call::new(
             self.clone(),
             Method::POST,
-            "/v1/systemone",
+            self.inner.backend.system_one_path(),
             body.map(Some),
             call::parse_json,
         )
@@ -142,6 +168,7 @@ impl Client {
 impl fmt::Debug for Client {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Client")
+            .field("backend", &self.inner.backend)
             .field("base_url", &self.inner.base_url)
             .field("default_model", &self.inner.default_model)
             .field("retry", &self.inner.retry)

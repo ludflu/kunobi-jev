@@ -11,8 +11,9 @@ use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use secrecy::SecretString;
 use tokio::sync::Semaphore;
 
-use super::env::{ENV_API_KEY, ENV_BASE_URL, ENV_DEFAULT_MODEL, read_env};
-use super::{Client, DEFAULT_BASE_URL, DEFAULT_MODEL, Inner};
+use super::backend::Backend;
+use super::env::read_env;
+use super::{Client, Inner};
 use crate::credentials::{BoxError, CredentialProvider, Credentials, FnProvider, bearer_header};
 use crate::error::{Error, Result};
 use crate::retry::{DEFAULT_TIMEOUT, DEFAULT_TOTAL_TIMEOUT, RetryPolicy};
@@ -23,6 +24,7 @@ use crate::retry::{DEFAULT_TIMEOUT, DEFAULT_TOTAL_TIMEOUT, RetryPolicy};
 /// Blank environment values are ignored.
 #[derive(Default)]
 pub struct ClientBuilder {
+    backend: Option<Backend>,
     credentials: Option<Credentials>,
     base_url: Option<String>,
     allow_insecure_http: bool,
@@ -39,6 +41,21 @@ pub struct ClientBuilder {
 }
 
 impl ClientBuilder {
+    /// Opt in to [OpenRouter](https://openrouter.ai)'s Decisions API for Jev.
+    ///
+    /// The default backend is TypeSafe until this is called. Sets the base URL to
+    /// [`OPENROUTER_DEFAULT_BASE_URL`](super::OPENROUTER_DEFAULT_BASE_URL),
+    /// the default model to [`OPENROUTER_DEFAULT_MODEL`](super::OPENROUTER_DEFAULT_MODEL), and
+    /// reads `OPENROUTER_API_KEY` when no key is set in code. Per-call behavior, question types,
+    /// and [`SystemOneResult`](crate::SystemOneResult) parsing match the TypeSafe backend.
+    ///
+    /// Optional OpenRouter headers such as `HTTP-Referer` and `X-OpenRouter-Title` can be added
+    /// with [`ClientBuilder::default_header`].
+    pub fn openrouter(mut self) -> Self {
+        self.backend = Some(Backend::OpenRouter);
+        self
+    }
+
     /// Authenticate with a TypeSafe API key; falls back to `TYPESAFE_API_KEY`.
     ///
     /// The key is held as a [`SecretString`] and wiped from memory when the client
@@ -175,14 +192,18 @@ impl ClientBuilder {
     }
 
     fn build_with_env(self, env: impl Fn(&str) -> Option<String>) -> Result<Client> {
+        let backend = self.backend.unwrap_or_default();
         let credentials = match self.credentials {
             Some(credentials) => credentials,
-            None => Credentials::ApiKey(SecretString::from(env(ENV_API_KEY).ok_or_else(|| {
-                Error::Config(format!(
-                    "No credentials were provided. Call `ClientBuilder::api_key` or \
-                     `ClientBuilder::credential_provider`, or set the {ENV_API_KEY} environment variable."
-                ))
-            })?)),
+            None => {
+                let env_key = backend.env_api_key();
+                Credentials::ApiKey(SecretString::from(env(env_key).ok_or_else(|| {
+                    Error::Config(format!(
+                        "No credentials were provided. Call `ClientBuilder::api_key` or \
+                         `ClientBuilder::credential_provider`, or set the {env_key} environment variable."
+                    ))
+                })?))
+            }
         };
         if let Credentials::ApiKey(key) = &credentials {
             bearer_header(key)
@@ -191,15 +212,15 @@ impl ClientBuilder {
 
         let base_url = self
             .base_url
-            .or_else(|| env(ENV_BASE_URL))
-            .unwrap_or_else(|| DEFAULT_BASE_URL.to_owned());
+            .or_else(|| env(backend.env_base_url()))
+            .unwrap_or_else(|| backend.default_base_url().to_owned());
         let base_url = base_url.trim().trim_end_matches('/').to_owned();
         validate_base_url(&base_url, self.allow_insecure_http)?;
 
         let default_model = self
             .default_model
-            .or_else(|| env(ENV_DEFAULT_MODEL))
-            .unwrap_or_else(|| DEFAULT_MODEL.to_owned());
+            .or_else(|| env(backend.env_default_model()))
+            .unwrap_or_else(|| backend.default_model().to_owned());
 
         let retry = self.retry.unwrap_or_default();
         retry.validate()?;
@@ -239,6 +260,7 @@ impl ClientBuilder {
 
         Ok(Client {
             inner: Arc::new(Inner {
+                backend,
                 credentials,
                 base_url,
                 log_bodies: self.log_bodies,
@@ -299,6 +321,7 @@ pub(crate) fn validate_timeout(timeout: Duration) -> Result<Duration> {
 impl fmt::Debug for ClientBuilder {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ClientBuilder")
+            .field("backend", &self.backend)
             .field("credentials", &self.credentials)
             .field("base_url", &self.base_url)
             .field("allow_insecure_http", &self.allow_insecure_http)
@@ -315,7 +338,13 @@ impl fmt::Debug for ClientBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::client::env::non_blank;
+    use crate::client::env::{
+        non_blank, ENV_API_KEY, ENV_BASE_URL, ENV_DEFAULT_MODEL, ENV_OPENROUTER_API_KEY,
+        ENV_OPENROUTER_BASE_URL, ENV_OPENROUTER_DEFAULT_MODEL,
+    };
+    use crate::client::{
+        DEFAULT_BASE_URL, DEFAULT_MODEL, OPENROUTER_DEFAULT_BASE_URL, OPENROUTER_DEFAULT_MODEL,
+    };
     use std::collections::HashMap;
 
     fn env(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
@@ -354,6 +383,55 @@ mod tests {
             .api_key(" ")
             .build_with_env(env(&[(ENV_API_KEY, "k")]));
         assert_eq!(blank_code.unwrap_err().to_string(), "The API key is blank.");
+    }
+
+    #[tokio::test]
+    async fn openrouter_uses_its_environment_and_defaults() {
+        let client = builder()
+            .openrouter()
+            .build_with_env(env(&[(ENV_OPENROUTER_API_KEY, " or-key ")]))
+            .unwrap();
+        assert_eq!(client.backend(), Backend::OpenRouter);
+        assert_eq!(client.base_url(), OPENROUTER_DEFAULT_BASE_URL);
+        assert_eq!(client.default_model(), OPENROUTER_DEFAULT_MODEL);
+        assert_eq!(authorization(&client).await, "Bearer or-key");
+
+        let from_env = builder()
+            .openrouter()
+            .build_with_env(env(&[
+                (ENV_OPENROUTER_API_KEY, "k"),
+                (ENV_OPENROUTER_BASE_URL, "http://localhost:9090"),
+                (ENV_OPENROUTER_DEFAULT_MODEL, "typesafe/jev-1.13"),
+            ]))
+            .unwrap();
+        assert_eq!(from_env.base_url(), "http://localhost:9090");
+        assert_eq!(from_env.default_model(), "typesafe/jev-1.13");
+    }
+
+    #[test]
+    fn openrouter_requires_openrouter_api_key() {
+        let err = builder().openrouter().build_with_env(env(&[])).unwrap_err();
+        assert!(err.to_string().contains(ENV_OPENROUTER_API_KEY), "{err}");
+    }
+
+    #[test]
+    fn default_client_stays_typesafe_when_openrouter_env_is_set() {
+        let err = builder()
+            .build_with_env(env(&[(ENV_OPENROUTER_API_KEY, "or-key")]))
+            .unwrap_err();
+        assert!(err.to_string().contains(ENV_API_KEY), "{err}");
+
+        let client = builder()
+            .build_with_env(env(&[
+                (ENV_API_KEY, "ts-key"),
+                (ENV_OPENROUTER_API_KEY, "or-key"),
+                (ENV_OPENROUTER_BASE_URL, "https://openrouter.example/api"),
+                (ENV_OPENROUTER_DEFAULT_MODEL, "~typesafe/jev-latest"),
+            ]))
+            .unwrap();
+        assert_eq!(client.backend(), Backend::TypeSafe);
+        assert_eq!(client.base_url(), DEFAULT_BASE_URL);
+        assert_eq!(client.default_model(), DEFAULT_MODEL);
     }
 
     #[tokio::test]
